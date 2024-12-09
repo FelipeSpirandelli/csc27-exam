@@ -3,6 +3,7 @@ module example.com/mq
 go 1.22.4
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	go.uber.org/zap v1.27.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
