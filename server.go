@@ -119,10 +119,29 @@ func (s *Server) listenToClient(client *ClientManager) {
 
 		_, msgBytes, err := client.conn.ReadMessage()
 		if err != nil {
-			logger.Error("Failed to read message",
-				zap.String("transactionId", transactionId),
-				zap.String("status", "error"),
-				zap.Error(err))
+			// Determine if the error is due to a normal closure
+			if closeErr, ok := err.(*websocket.CloseError); ok {
+				switch closeErr.Code {
+				case websocket.CloseNormalClosure, websocket.CloseGoingAway:
+					logger.Info("Client closed the connection gracefully",
+						zap.String("transactionId", transactionId),
+						zap.Int("closeCode", closeErr.Code),
+						zap.String("reason", closeErr.Text),
+						zap.String("status", "info"))
+				default:
+					logger.Error("WebSocket closed with error",
+						zap.String("transactionId", transactionId),
+						zap.Int("closeCode", closeErr.Code),
+						zap.String("reason", closeErr.Text),
+						zap.String("status", "error"))
+				}
+			} else {
+				// Handle other types of errors (e.g., network issues)
+				logger.Error("Failed to read message",
+					zap.String("transactionId", transactionId),
+					zap.String("status", "error"),
+					zap.Error(err))
+			}
 			return
 		}
 
