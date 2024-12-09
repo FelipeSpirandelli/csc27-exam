@@ -162,7 +162,7 @@ func (s *Server) listenToClient(client *ClientManager) {
 					zap.Error(err))
 				continue
 			}
-			if client.ackManager.GetLastAcked(msg.Topic)+1 != msg.ClientMessageNo {
+			if client.ackManager.GetLastClientAcked(msg.Topic)+1 != msg.ClientMessageNo {
 				logger.Warn("Ignoring out-of-order message",
 					zap.String("transactionId", transactionId),
 					zap.String("status", "data"),
@@ -172,6 +172,7 @@ func (s *Server) listenToClient(client *ClientManager) {
 			}
 			s.publishToTopic(msg.Topic, msg.Data, transactionId)
 			s.ackPublishToTopic(client, msg.Topic, msg.ClientMessageNo, transactionId)
+			client.ackManager.SetLastClientAcked(msg.Topic, msg.ClientMessageNo)
 
 		case "ack":
 			var msg AckMessage
@@ -264,7 +265,7 @@ func (s *Server) ackPublishToTopic(client *ClientManager, topic string, clientMe
 }
 
 func (s *Server) treatAckMessage(client *ClientManager, topic string, queueNo int, transactionId string) {
-	client.ackManager.SetLastAcked(topic, queueNo)
+	client.ackManager.SetLastQueueAcked(topic, queueNo)
 	logger.Info("Message acked",
 		zap.String("transactionId", transactionId),
 		zap.String("status", "commit"),
@@ -290,7 +291,7 @@ func (s *Server) sendUnackedMessagesRoutine(client *ClientManager) {
 			}
 
 			t.mu.Lock()
-			lastAcked := client.ackManager.GetLastAcked(topicName)
+			lastAcked := client.ackManager.GetLastQueueAcked(topicName)
 			for i := lastAcked; i < len(t.messages); i++ {
 				msgsToSend = append(msgsToSend, queuedMessage{
 					Action: "send",

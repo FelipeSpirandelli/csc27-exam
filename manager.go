@@ -5,24 +5,38 @@ import (
 )
 
 type MessageAckManager struct {
-	mu           sync.Mutex
-	lastAckedMap map[string]int
+	mu                 sync.Mutex
+	lastQueueAckedMap  map[string]int
+	lastClientAckedMap map[string]int
 }
 
 func NewMessageAckManager() *MessageAckManager {
 	return &MessageAckManager{
-		lastAckedMap: make(map[string]int),
+		lastQueueAckedMap:  make(map[string]int),
+		lastClientAckedMap: make(map[string]int),
 	}
 }
 
-func (m *MessageAckManager) GetLastAcked(topic string) int {
+func (m *MessageAckManager) GetLastQueueAcked(topic string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.lastAckedMap[topic]
+	return m.lastQueueAckedMap[topic]
 }
 
-func (m *MessageAckManager) SetLastAcked(topic string, no int) {
+func (m *MessageAckManager) SetLastQueueAcked(topic string, no int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.lastAckedMap[topic] = no
+	m.lastQueueAckedMap[topic] = no
+}
+
+func (m *MessageAckManager) GetLastClientAcked(topic string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastClientAckedMap[topic]
+}
+
+func (m *MessageAckManager) SetLastClientAcked(topic string, no int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastClientAckedMap[topic] = no
 }
