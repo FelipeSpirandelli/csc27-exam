@@ -4,7 +4,6 @@ import (
 	"sync"
 
 	"example.com/mq/logger"
-	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
@@ -30,21 +29,6 @@ func (t *Topic) Publish(message string) {
 	t.mu.Lock()
 	t.messages = append(t.messages, message)
 	t.mu.Unlock()
-
-	logger.Info("Message published", zap.String("topic", t.name), zap.String("message", message))
-
-	// Broadcast to all subscribers.
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	for client := range t.subscribers {
-		err := client.conn.WriteMessage(websocket.TextMessage, []byte(message))
-		if err != nil {
-			logger.Error("Failed to deliver message", zap.String("topic", t.name), zap.Error(err))
-			continue
-		}
-		logger.Info("Message delivered", zap.String("topic", t.name), zap.String("client", client.conn.RemoteAddr().String()))
-	}
 }
 
 // AddSubscriber adds a client to the topic's subscriber list.
