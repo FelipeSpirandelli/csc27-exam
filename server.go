@@ -19,7 +19,6 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-// ClientManager represents a connected client.
 type ClientManager struct {
 	conn                  *websocket.Conn
 	ackManager            *MessageAckManager
@@ -28,14 +27,44 @@ type ClientManager struct {
 	sendingRoutineStarted bool
 }
 
-// Server represents the WebSocket server.
 type Server struct {
 	mu      sync.Mutex
 	clients map[*ClientManager]bool
 	topics  map[string]*Topic
 }
 
-// NewServer initializes a new Server.
+type BaseMessage struct {
+	Action string `json:"action"`
+	Topic  string `json:"topic"`
+}
+
+type PublishMessage struct {
+	BaseMessage
+	Data            string `json:"data"`
+	ClientMessageNo int    `json:"clientMessageNo"`
+}
+
+type AckPublishMessage struct {
+	BaseMessage
+	ClientMessageNo int `json:"clientMessageNo"`
+}
+
+type SubscribeMessage struct {
+	BaseMessage
+}
+
+type AckMessage struct {
+	BaseMessage
+	QueueMessageNo int `json:"queueMessageNo"`
+}
+
+type queuedMessage struct {
+	Action string `json:"action"`
+	Topic  string `json:"topic"`
+	No     int    `json:"queueMessageNo"`
+	Data   string `json:"data"`
+}
+
 func NewServer() *Server {
 	return &Server{
 		clients: make(map[*ClientManager]bool),
@@ -43,12 +72,12 @@ func NewServer() *Server {
 	}
 }
 
-// HandleClient manages an individual client connection.
 func (s *Server) HandleClient(w http.ResponseWriter, r *http.Request) {
-	// Upgrade to WebSocket.
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		logger.Error("Failed to upgrade connection", zap.Error(err))
+		logger.Error("Failed to upgrade connection",
+			zap.Error(err))
 		return
 	}
 
@@ -67,138 +96,166 @@ func (s *Server) HandleClient(w http.ResponseWriter, r *http.Request) {
 		delete(s.clients, client)
 		s.mu.Unlock()
 		client.conn.Close()
+		logger.Info("Client disconnected",
+			zap.String("status", "finish"),
+			zap.String("client", conn.RemoteAddr().String()))
 	}()
 
-	logger.Info("Client connected", zap.String("client", conn.RemoteAddr().String()))
+	logger.Info("Client connected",
+		zap.String("status", "begin"),
+		zap.String("client", conn.RemoteAddr().String()))
+
 	s.listenToClient(client)
+	logger.Info("Finished client handling",
+		zap.String("status", "finish"))
 }
 
-// BaseMessage basic struct for action/topic messages.
-type BaseMessage struct {
-	Action string `json:"action"`
-	Topic  string `json:"topic"`
-}
-
-// PublishMessage includes Data and ClientMessageNo.
-type PublishMessage struct {
-	BaseMessage
-	Data            string `json:"data"`
-	ClientMessageNo int    `json:"clientMessageNo"`
-}
-
-type AckPublishMessage struct {
-	BaseMessage
-	ClientMessageNo int `json:"clientMessageNo"`
-}
-
-// SubscribeMessage includes only Action and Topic.
-type SubscribeMessage struct {
-	BaseMessage
-}
-
-// AckMessage includes QueueMessageNo.
-type AckMessage struct {
-	BaseMessage
-	QueueMessageNo int `json:"queueMessageNo"`
-}
-
-// listenToClient listens for incoming messages from a client.
 func (s *Server) listenToClient(client *ClientManager) {
 	for {
+		transactionId := utils.GenerateTransactionID()
+		logger.Info("Waiting to receive new message",
+			zap.String("transactionId", transactionId),
+			zap.String("status", "begin"))
+
 		_, msgBytes, err := client.conn.ReadMessage()
 		if err != nil {
-			logger.Error("Failed to read message", zap.Error(err))
+			logger.Error("Failed to read message",
+				zap.String("transactionId", transactionId),
+				zap.String("status", "error"),
+				zap.Error(err))
 			return
 		}
 
 		var base BaseMessage
 		if err := json.Unmarshal(msgBytes, &base); err != nil {
-			logger.Warn("Failed to parse base message", zap.Error(err))
+			logger.Warn("Failed to parse base message",
+				zap.String("transactionId", transactionId),
+				zap.String("status", "data"),
+				zap.Error(err))
 			continue
 		}
+
+		logger.Debug("Received message",
+			zap.String("transactionId", transactionId),
+			zap.String("status", "data"),
+			zap.String("action", base.Action),
+			zap.String("topic", base.Topic))
 
 		switch base.Action {
 		case "subscribe":
 			var msg SubscribeMessage
 			if err := json.Unmarshal(msgBytes, &msg); err != nil {
-				logger.Warn("Failed to parse subscribe message", zap.Error(err))
+				logger.Warn("Failed to parse subscribe message",
+					zap.String("transactionId", transactionId),
+					zap.String("status", "data"),
+					zap.Error(err))
 				continue
 			}
-			s.subscribeClientToTopic(client, msg.Topic)
+			s.subscribeClientToTopic(client, msg.Topic, transactionId)
 
 		case "publish":
 			var msg PublishMessage
 			if err := json.Unmarshal(msgBytes, &msg); err != nil {
-				logger.Warn("Failed to parse publish message", zap.Error(err))
+				logger.Warn("Failed to parse publish message",
+					zap.String("transactionId", transactionId),
+					zap.String("status", "data"),
+					zap.Error(err))
 				continue
 			}
 			if client.ackManager.GetLastAcked(msg.Topic)+1 != msg.ClientMessageNo {
-				logger.Warn("Ignoring out-of-order message", zap.String("topic", msg.Topic), zap.Int("clientMessageNo", msg.ClientMessageNo))
+				logger.Warn("Ignoring out-of-order message",
+					zap.String("transactionId", transactionId),
+					zap.String("status", "data"),
+					zap.String("topic", msg.Topic),
+					zap.Int("clientMessageNo", msg.ClientMessageNo))
 				continue
 			}
-			s.publishToTopic(msg.Topic, msg.Data)
-			s.ackPublishToTopic(client, msg.Topic, msg.ClientMessageNo)
+			s.publishToTopic(msg.Topic, msg.Data, transactionId)
+			s.ackPublishToTopic(client, msg.Topic, msg.ClientMessageNo, transactionId)
+
 		case "ack":
 			var msg AckMessage
 			if err := json.Unmarshal(msgBytes, &msg); err != nil {
-				logger.Warn("Failed to parse ack message", zap.Error(err))
+				logger.Warn("Failed to parse ack message",
+					zap.String("transactionId", transactionId),
+					zap.String("status", "data"),
+					zap.Error(err))
 				continue
 			}
-			s.treatAckMessage(client, msg.Topic, msg.QueueMessageNo)
+			s.treatAckMessage(client, msg.Topic, msg.QueueMessageNo, transactionId)
+
 		default:
-			logger.Warn("Unknown action", zap.String("action", base.Action))
+			logger.Warn("Unknown action",
+				zap.String("transactionId", transactionId),
+				zap.String("status", "data"),
+				zap.String("action", base.Action))
 		}
+
+		logger.Info("Message processed",
+			zap.String("transactionId", transactionId),
+			zap.String("status", "commit"))
 	}
 }
 
-// subscribeClientToTopic subscribes a client to a specific topic.
-// It also ensures that the unacked messages routine is started only once.
-func (s *Server) subscribeClientToTopic(client *ClientManager, topic string) {
+func (s *Server) subscribeClientToTopic(client *ClientManager, topic string, transactionId string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	t, exists := s.topics[topic]
+	s.mu.Unlock()
+
 	if !exists {
-		logger.Warn("Topic not found", zap.String("topic", topic))
+		logger.Warn("Topic not found",
+			zap.String("transactionId", transactionId),
+			zap.String("status", "data"),
+			zap.String("topic", topic))
 		return
 	}
 
 	client.topics[topic] = true
-	t.AddSubscriber(client)
-	logger.Info("Client subscribed to topic", zap.String("client", client.conn.RemoteAddr().String()), zap.String("topic", topic))
+	t.AddSubscriber(client, transactionId)
 
-	// Start sending routine for client if not already started
+	logger.Info("Client subscribed to topic",
+		zap.String("transactionId", transactionId),
+		zap.String("status", "commit"),
+		zap.String("client", client.conn.RemoteAddr().String()),
+		zap.String("topic", topic))
+
 	if !client.sendingRoutineStarted {
 		client.sendingRoutineStarted = true
 		go s.sendUnackedMessagesRoutine(client)
 	}
 }
 
-// publishToTopic handles publishing a message to a topic.
-// IMPORTANT: Now we only enqueue the message.
-func (s *Server) publishToTopic(topic, data string) {
+func (s *Server) publishToTopic(topic, data string, transactionId string) {
 	s.mu.Lock()
 	t, exists := s.topics[topic]
 	s.mu.Unlock()
 
 	if !exists {
-		logger.Warn("Topic not found", zap.String("topic", topic))
+		logger.Warn("Topic not found",
+			zap.String("transactionId", transactionId),
+			zap.String("status", "data"),
+			zap.String("topic", topic))
 		return
 	}
 
-	// Add the message to the topic queue (no immediate sending)
-	t.Publish(data)
+	t.Publish(data, transactionId)
+	logger.Info("Message published to topic",
+		zap.String("transactionId", transactionId),
+		zap.String("status", "commit"),
+		zap.String("topic", topic))
 }
 
-func (s *Server) ackPublishToTopic(client *ClientManager, topic string, clientMessageNo int) {
-	// Send ack back to publisher to confirm reception of their message
+func (s *Server) ackPublishToTopic(client *ClientManager, topic string, clientMessageNo int, transactionId string) {
 	ack := AckPublishMessage{
 		BaseMessage:     BaseMessage{Action: "ack", Topic: topic},
 		ClientMessageNo: clientMessageNo,
 	}
 	ackBytes, err := json.Marshal(ack)
 	if err != nil {
-		logger.Errorf("Failed to marshal ack message: %v", err)
+		logger.Error("Failed to marshal ack message",
+			zap.String("transactionId", transactionId),
+			zap.String("status", "error"),
+			zap.Error(err))
 		return
 	}
 	go utils.ExponentialBackoff(func() error {
@@ -206,20 +263,23 @@ func (s *Server) ackPublishToTopic(client *ClientManager, topic string, clientMe
 	}, 5, 400*time.Millisecond, 20*time.Second)
 }
 
-// treatAckMessage updates the last acked message number for that client and topic.
-func (s *Server) treatAckMessage(client *ClientManager, topic string, queueNo int) {
+func (s *Server) treatAckMessage(client *ClientManager, topic string, queueNo int, transactionId string) {
 	client.ackManager.SetLastAcked(topic, queueNo)
-	logger.Info("Message acked", zap.String("topic", topic), zap.Int("queueNo", queueNo))
+	logger.Info("Message acked",
+		zap.String("transactionId", transactionId),
+		zap.String("status", "commit"),
+		zap.String("topic", topic),
+		zap.Int("queueNo", queueNo))
 }
 
 func (s *Server) sendUnackedMessagesRoutine(client *ClientManager) {
 	baseDelay := 400 * time.Millisecond
 	maxDelay := 40 * time.Second
 	delay := baseDelay
+	transactionId := utils.GenerateTransactionID()
 
 	for {
 		client.mu.Lock()
-		// Collect unacked messages from all subscribed topics
 		var msgsToSend []queuedMessage
 		for topicName := range client.topics {
 			s.mu.Lock()
@@ -243,23 +303,18 @@ func (s *Server) sendUnackedMessagesRoutine(client *ClientManager) {
 		}
 		client.mu.Unlock()
 
-		// If no messages, reset delay and sleep
 		if len(msgsToSend) == 0 {
-			delay = baseDelay
 			time.Sleep(delay)
 			continue
 		}
 
-		// Attempt to send all unacked messages as one batch
-		err := sendAllMessagesOnce(client, msgsToSend)
+		err := sendAllMessagesOnce(client, msgsToSend, transactionId)
 		if err == nil {
-			// Success: reset delay and wait before next check
 			delay = baseDelay
 			time.Sleep(delay)
 			continue
 		}
 
-		// Failed to send: apply exponential backoff
 		delay = delay * 2
 		if delay > maxDelay {
 			delay = maxDelay
@@ -268,29 +323,27 @@ func (s *Server) sendUnackedMessagesRoutine(client *ClientManager) {
 	}
 }
 
-// sendAllMessagesOnce attempts to send a batch of messages once.
-func sendAllMessagesOnce(client *ClientManager, msgs []queuedMessage) error {
+func sendAllMessagesOnce(client *ClientManager, msgs []queuedMessage, transactionId string) error {
 	for _, qm := range msgs {
 		qmMsgBytes, err := json.Marshal(qm)
 		if err != nil {
-			logger.Errorf("Failed to marshal qm message: %v", err)
+			logger.Error("Failed to marshal qm message",
+				zap.String("transactionId", transactionId),
+				zap.String("status", "error"),
+				zap.Error(err))
 			return err
 		}
 		if err := client.conn.WriteMessage(websocket.TextMessage, qmMsgBytes); err != nil {
+			logger.Error("Failed to send message",
+				zap.String("transactionId", transactionId),
+				zap.String("status", "error"),
+				zap.Error(err))
 			return err
 		}
 	}
 	return nil
 }
 
-type queuedMessage struct {
-	Action string `json:"action"`
-	Topic  string `json:"topic"`
-	No     int    `json:"queueMessageNo"`
-	Data   string `json:"data"`
-}
-
-// Run starts the WebSocket server.
 func (s *Server) Run(addr string) {
 	http.HandleFunc("/ws", s.HandleClient)
 	log.Fatal(http.ListenAndServe(addr, nil))
@@ -300,17 +353,25 @@ func main() {
 	defer logger.Sync()
 
 	logger.Info("Application started",
+		zap.String("transactionId", utils.GenerateTransactionID()),
+		zap.String("status", "begin"),
 		zap.String("version", "1.0.0"),
 		zap.Time("timestamp", time.Now()),
 	)
 
 	server := NewServer()
 
-	// Initialize some topics.
 	server.topics["news"] = NewTopic("news")
 	server.topics["sports"] = NewTopic("sports")
 	server.topics["tech"] = NewTopic("tech")
 
-	logger.Info("Server starting", zap.String("addr", ":8082"))
+	logger.Info("Server starting",
+		zap.String("transactionId", utils.GenerateTransactionID()),
+		zap.String("status", "begin"),
+		zap.String("addr", ":8082"))
 	server.Run(":8082")
+	logger.Info("Server stopped",
+		zap.String("transactionId", utils.GenerateTransactionID()),
+		zap.String("status", "finish"))
+
 }

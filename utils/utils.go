@@ -4,6 +4,8 @@ import (
 	"errors"
 	"math"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ExponentialBackoff retries a given operation with exponential backoff.
@@ -36,4 +38,9 @@ func ExponentialBackoff(operation func() error, maxRetries int, baseDelay, maxDe
 		time.Sleep(delay)
 	}
 	return err
+}
+
+// GenerateTransactionID generates a unique transaction identifier using a UUID.
+func GenerateTransactionID() string {
+	return uuid.New().String()
 }
