@@ -93,6 +93,9 @@ func (s *Server) HandleClient(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		s.mu.Lock()
+		for topic := range client.topics {
+			s.topics[topic].RemoveSubscriber(client, utils.GenerateTransactionID())
+		}
 		delete(s.clients, client)
 		s.mu.Unlock()
 		client.conn.Close()
